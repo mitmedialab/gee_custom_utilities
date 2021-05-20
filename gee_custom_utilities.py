@@ -160,7 +160,7 @@ def time_series_regions_reducer(imgcol,
     return df
 
 # =============================================================================
-# %% 3 - GENERAL GEE UPLOAD AND IMPORT       
+# %% 3 - GENERAL GEE ASSET MANAGEMENT      
 # =============================================================================
 
 def format_dir_nospace(dirpath):
@@ -216,6 +216,37 @@ def gcloud_upload(geotiffFolder, bucket):
         index+=1
         percentageComplete = index/totalLength*100
         print(str(percentageComplete) + "% Complete")
+        
+
+def delete_collection_contents(collection_title):
+    """DELETES ALL IMAGES IN A GEE IMAGE COLLECTION
+    
+    Args:
+        collection_title: Str, full path of image collection    
+    Returns:
+        new_list: List, list of deleted images by id
+    """
+    collect = ee.ImageCollection(collection_title)
+    collection_size = int(collect.size().getInfo())
+    collect_list = collect.toList(collection_size)
+
+    def get_ids(inp):
+        return ee.Image(inp).id()
+
+    id_list = ee.List(collect_list.map(get_ids))
+
+
+    new_list = id_list.getInfo()
+    print('NUMBER OF IMAGES TO BE DELETED: ', len(new_list))
+    collectstring = collection_title + '/'
+      
+    for entry in new_list:
+        delete_string = collectstring + entry
+        print(delete_string)
+        ee.data.deleteAsset(delete_string)
+        time.sleep(0.5)
+    
+    return new_list
 
 # =============================================================================
 # %% 4 - BLACK MARBLE NIGHTLIGHTS CONVERSION AND IMPORT           
@@ -311,6 +342,8 @@ def bm_hd5_to_geotiff(hd5Folder, geotiffFolder):
         index+=1
         percentageComplete = index/totalLength*100
         print(str(percentageComplete) + "% Complete")
+    subprocess.call('rmdir ' + tempFolder, shell=True)
+
         
 
 def bmA2_gee_import(bucket, destination):
