@@ -13,9 +13,22 @@ from datetime import timedelta
 import pandas as pd
 import numpy as np
 from dateutil.parser import parse
-import gdal, os
+import os
+from osgeo import gdal
 import subprocess
 import time
+
+"""NOTE: The various functions in this module make use of the Google Earth Engine
+Python API (ee) and the Google Cloud command line python application (gsutil). 
+
+The first time you use ee, you will be required to authenticate and subsequent times
+will require you initialize prior to calling it. You can see more information on this here:
+https://developers.google.com/earth-engine/guides/python_install
+
+gsutil requires that you log-on to your Google Cloud account for some of the calls
+performed in this modeule. You can do this by running "gsutil config" in a command
+line and following the prompts.
+"""
 
 # =============================================================================
 # %% 1 - DISPLAYING / FOLIUM UTILITIES             
@@ -116,42 +129,60 @@ def time_series_regions_reducer(imgcol,
 
     #Mapping function to conduct reduction on each image
     def run_reduce(img):
-        feat_reduce = (img.select(bands).reduceRegions(
-                    collection = geometry,
-                    reducer = fun,
-                    scale = scale))
         
-        #Convert reduction to lists
-        data_list_bairro = ee.List(feat_reduce.reduceColumns(ee.Reducer.toList(1), [FeatureID]).get('list'))
-        data_list_median = ee.List(feat_reduce.reduceColumns(ee.Reducer.toList(1), [stats]).get('list'))
-        data_list_bairro_simple = ee.List(data_list_bairro.map(list_simplify))
-        data_list_median_simple = ee.List(data_list_median.map(list_simplify))
+        if type(geometry) is ee.featurecollection.FeatureCollection:
+            feat_reduce = (img.select(bands).reduceRegions(
+                        collection = geometry,
+                        reducer = fun,
+                        scale = scale))
+            
+            #Convert reduction to lists
+            data_list_bairro = ee.List(feat_reduce.reduceColumns(ee.Reducer.toList(1), [FeatureID]).get('list'))
+            data_list_median = ee.List(feat_reduce.reduceColumns(ee.Reducer.toList(1), [stats]).get('list'))
+            data_list_bairro_simple = ee.List(data_list_bairro.map(list_simplify))
+            data_list_median_simple = ee.List(data_list_median.map(list_simplify))
+            
+            #Replace null values with -999999
+            data_list_median_simple = ee.Algorithms.If(data_list_median_simple.length().lt(ee.List(data_list_bairro_simple).length())
+                                                       ,ee.List.repeat(-999999,data_list_bairro_simple.length()),
+                                                       data_list_median_simple)
         
-        #Replace null values with -999999
-        data_list_median_simple = ee.Algorithms.If(data_list_median_simple.length().lt(ee.List(data_list_bairro_simple).length())
-                                                   ,ee.List.repeat(-999999,data_list_bairro_simple.length()),
-                                                   data_list_median_simple)
-    
-        #Convert from lists to dictionary
-        data_dict = ee.Dictionary.fromLists(data_list_bairro_simple, data_list_median_simple)
-    
+            #Convert from lists to dictionary
+            data_dict = ee.Dictionary.fromLists(data_list_bairro_simple, data_list_median_simple)
+        
+        else:
+            feat_reduce = (img.select(bands).reduceRegion(
+                        geometry = geometry,
+                        reducer = fun,
+                        scale = scale))
+            data_dict = ee.Dictionary(feat_reduce)
         #Return original image with reduced statistics added as properties
         return img.set(data_dict)
     
     #Run reduction on imgcol
     reduced_collection = imgcol.map(run_reduce)
     
-    #Generate lists of dataframe column names
-    bairros_list_temp = ee.List(geometry.reduceColumns(ee.Reducer.toList(1), [FeatureID]).get('list'))
-    bairros_list = bairros_list_temp.map(list_simplify)
-    bairros_list_complete = bairros_list.add('system:time_start')
+    if type(geometry) is ee.featurecollection.FeatureCollection:
+        #Generate lists of dataframe column names
+        bairros_list_temp = ee.List(geometry.reduceColumns(ee.Reducer.toList(1), [FeatureID]).get('list'))
+        bairros_list = bairros_list_temp.map(list_simplify)
+        bairros_list_complete = bairros_list.add('system:time_start')
+        
+        #Extract reduced statistics from image collection into list
+        nested_list = reduced_collection.reduceColumns(ee.Reducer.toList(bairros_list_complete.length()), bairros_list_complete).values().get(0)
     
-    #Extract reduced statistics from image collection into list
-    nested_list = reduced_collection.reduceColumns(ee.Reducer.toList(bairros_list_complete.length()), bairros_list_complete).values().get(0)
+        #Convert reduced statistics into dataframe and convert null values to NaN
+        df = (pd.DataFrame(nested_list.getInfo(), columns=list(bairros_list_complete.getInfo())).replace(-999999,np.nan))
+    else:
+        bairros_list_temp = ee.List(bands)
+        bairros_list_complete = bairros_list_temp.add('system:time_start')
+        
+        #Extract reduced statistics from image collection into list
+        nested_list = reduced_collection.reduceColumns(ee.Reducer.toList(bairros_list_complete.length()), bairros_list_complete).values().get(0)
     
-    #Convert reduced statistics into dataframe and convert null values to NaN
-    df = (pd.DataFrame(nested_list.getInfo(), columns=list(bairros_list_complete.getInfo())).replace(-999999,np.nan))
-    
+        #Convert reduced statistics into dataframe and convert null values to NaN
+        df = (pd.DataFrame(nested_list.getInfo(), columns=list(bairros_list_complete.getInfo())).replace(-999999,np.nan))
+   
     #Convert timeunit if appropriate
     if timeunit == 'date':
         for index in df.index.values.tolist():
@@ -362,6 +393,8 @@ def bmA2_gee_import(bucket, destination):
     filenames_raw = subprocess.getoutput('gsutil ls gs://' + bucket)
     filenames_split = [x[5:] for x in filenames_raw.split()]
     totalLength = len(filenames_split)
+    print('Total Files ', totalLength)
+    # print(filenames_split)
 
     #Initiate null list to track asset id names to avoid overwrites
     asset_list = []
